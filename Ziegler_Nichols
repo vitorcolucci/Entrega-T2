@@ -1,0 +1,1011 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+# Funções importadas
+
+import control as clt
+import numpy as np
+import matplotlib.pyplot as plt
+import sympy as sy
+import scipy as sci
+import sympy.physics.control as syp
+from tbcontrol.symbolic import routh
+
+sy.init_printing()
+
+
+# In[2]:
+
+
+# Cad=symbols('Cad')
+# Rad=symbols('Rad')
+# Cvd=symbols('Cvd')
+# Rvd=symbols('Rvd')
+# Ccp=symbols('Ccp')
+# Rcp=symbols('Rcp')
+# Lcp=symbols('Lcp')
+# Cae=symbols('Cae')
+# Rae=symbols('Rae')
+# Cve=symbols('Cve')
+# Rve=symbols('Rve')
+# Ccs=symbols('Ccs')
+# Rcs=symbols('Rcs')
+# Lcs=symbols('Lcs')
+
+Ccp, Lcp, Rcp = 20, 0.0001, 0.1
+Ccs, Lcs, Rcs = 120, 0.0001, 0.2
+Cad, Cae = 3, 2
+
+
+# In[3]:
+
+
+# Definição dos parâmetros 
+
+def Condição (R_ad, C_vd, R_vd, R_ae, C_ve, R_ve):
+    Rad, Cvd, Rvd = R_ad, C_vd, R_vd
+    Rae, Cve, Rve = R_ae, C_ve, R_ve
+    return Rad, Cvd, Rvd, Rae, Cve, Rve
+
+# Definição dos termos forçantes: Função das pressões
+
+def P_a(ts, P_0, P_MAX, bpm=80):
+    TR = 60/bpm
+    CONT = ts % TR
+    if (0.88*TR) <= CONT <= TR:
+        PRES = P_0 + (P_MAX-P_0)*np.sin(np.pi*(CONT-0.88*TR)/(0.12*TR))
+    else:
+        PRES = P_0
+    return PRES
+
+def P_v(td,P_0, P_max, bpm=80):
+    Tr = 60/bpm
+    cont = td % Tr
+    if 0 <= cont <= 0.2*Tr:
+        Pres = P_0 + 0.5*(P_max-P_0)*(1-np.cos((np.pi*cont/(0.2*Tr))))
+    elif 0.2*Tr <= cont <= 0.43*Tr:
+        Pres = P_0 + 0.5*(P_max-P_0)*(1+np.cos((np.pi*(cont-0.2*Tr)/((0.43-0.2)*Tr))))
+    else:
+        Pres = P_0
+    return Pres
+
+def P_cp(td,P_0, P_max, bpm=80):
+    Tr = 60/bpm
+    cont = td % Tr
+    A = 10.1
+    B = P_0 + 0.5*(P_max-P_0)*(1-np.cos((2*np.pi*(0.8*Tr*0.33-0.08*Tr)/(Tr*0.33))))
+    D = (np.pi*(P_max-P_0)/(0.33*Tr))*np.sin((2*np.pi*(0.8*0.33-0.4*0.2)/(0.33)))
+    C =D /(A-B)
+    if 0 <= cont <= 0.08*Tr:
+        Pres = P_0
+    elif 0.08*Tr <= cont <= 0.8*0.33*Tr:
+        Pres = P_0 + 0.5*(P_max-P_0)*(1-np.cos((2*np.pi*(cont-0.08*Tr)/(Tr*0.33))))
+    else:
+        Pres = A + (B-A)*np.exp(-C*(cont-0.8*0.33*Tr))
+    return Pres
+
+
+def P_cs(td,P_0, P_max, bpm=80):
+    Tr = 60/bpm
+    cont = td % Tr
+    r = 0.56
+    u = 1.2
+    K = 1.02808998
+    o=(K*r+u*(K-1))/(2*K-1)
+    p=1/(r+u-2*o)
+    a = 0.5*(P_max-P_0)*p*np.pi/(0.2*Tr)*np.sin(p*np.pi*(u-o))
+    b = P_0 + 0.5*(P_max-P_0)*(1-np.cos((p*np.pi*(r*0.2*Tr-o*0.2*Tr)/(0.2*Tr))))
+    c = P_0 + 0.5*(P_max-P_0)*(1-np.cos((p*np.pi*(u*0.2*Tr-o*0.2*Tr)/(0.2*Tr))))
+    if 0 <= cont <= r*0.2*Tr:
+        Pres = a*(cont-r*0.2*Tr)+b
+    elif r*0.2*Tr <= cont <= u*0.2*Tr:
+        Pres = P_0 + 0.5*(P_max-P_0)*(1-np.cos((p*np.pi*(cont-o*0.2*Tr)/(0.2*Tr))))
+    else:
+        Pres = a*(cont-u*0.2*Tr)+c
+    return Pres
+
+
+# In[4]:
+
+
+# Definição das matrizes do espaço de estados
+
+def A_cond (Rad, Cvd, Rvd, Rae, Cve, Rve):
+    A=np.array([
+    [-1/(Cad*Rad),1/(Rad*Cvd),0,0,0,0,-1],
+    [1/(Cad*Rad),-1/(Rvd*Cvd)-1/(Rad*Cvd),0,0,1/(Rvd*Ccp),0,0],
+    [0,0,-1/(Cae*Rae),1/(Rae*Cve),0,-1,0],
+    [-1/(Ccs*Rve),-1/(Ccs*Rve),-1/(Ccs*Rve)+1/(Cae*Rae),-1/(Ccs*Rve)-1/(Rve*Cve)-1/(Rae*Cve),-1/(Ccs*Rve),0,0],
+    [0,1/(Rvd*Cvd),0,0,-1/(Rvd*Ccp),1,0],
+    [0,0,1/(Cae*Lcp),0,-1/(Ccp*Lcp),-Rcp/Lcp,0],
+    [1/(Cad*Lcs)+1/(Ccs*Lcs),1/(Ccs*Lcs),1/(Ccs*Lcs),1/(Ccs*Lcs),1/(Ccs*Lcs),0,-Rcs/Lcs]])
+    return A
+
+def B_cond (Rad, Cvd, Rvd, Rae, Cve, Rve):
+    B=np.array([
+    [0,0],
+    [-1/Rvd,0],
+    [0,0],
+    [0,-1/Rve],
+    [1/Rvd,0],
+    [0,0],
+    [0,0]
+    ])
+    return B
+
+def E_cond (Rad, Cvd, Rvd, Rae, Cve, Rve):
+    E=np.array([
+    [-1/Rad,0,0,0, 0],
+    [1/Rad,-1/Rvd,0,0, 0],
+    [0,0,-1/Rae,0, 0],
+    [0,0,1/Rae,-1/Rve, 1/(Ccs*Rve)],
+    [0,1/Rvd,0,0, 0],
+    [0,0,0,0, 0],
+    [0,0,0,0, -1/(Ccs*Lcs)]
+    ])
+    return E
+
+C=np.array([
+    [1,0,0,0,0,0,0],
+    [0,1,0,0,0,0,0]])
+
+D=np.array([
+    [0,0],
+    [0,0]])
+
+D0=np.array([
+    [0,0,0,0,0],
+    [0,0,0,0,0]])
+
+
+# In[5]:
+
+
+# Definição do vetor de tempo do ciclo cardíaco
+
+t_batimento = 0.75                                   # intervalo de tempo de um batimento cardíaco em segundos
+steps = 100000                                       # passos
+t_compl = np.linspace(0, t_batimento, steps)         
+
+ti = 0.0375
+tf = 0.15
+
+q0 = 5400 
+
+
+# In[6]:
+
+
+# Condição 1
+
+Rad, Cvd, Rvd, Rae, Cve, Rve = Condição(100, 8.99, 100, 100, 5.18, 100)
+A1s = A_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+B1s = B_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)    
+E1s = E_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+sys1s = clt.ss(A1s,B1s,C,D)
+sys1st = clt.ss(A1s,E1s,C,D0)
+Gs1 = clt.tf(sys1s)
+Ps1 = clt.poles(sys1s)
+
+Rad, Cvd, Rvd, Rae, Cve, Rve = Condição(100, 15, 100, 100, 10, 100)
+A1d = A_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+B1d = B_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)    
+E1d = E_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+sys1d = clt.ss(A1d,B1d,C,D)
+sys1dt = clt.ss(A1d,E1d,C,D0)
+Gd1 = clt.tf(sys1d)
+Pd1 = clt.poles(sys1d)
+
+# Condição 2
+
+Rad, Cvd, Rvd, Rae, Cve, Rve = Condição(100, 1.32, 0.01, 100, 0.58, 0.02)
+A2s = A_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+B2s = B_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)    
+E2s = E_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+sys2s = clt.ss(A2s,B2s,C,D)
+sys2st = clt.ss(A2s,E2s,C,D0)
+Gs2 = clt.tf(sys2s)
+Ps2 = clt.poles(sys2s)
+
+Rad, Cvd, Rvd, Rae, Cve, Rve = Condição(100, 15, 0.01, 100, 10, 0.02)
+A2d = A_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+B2d = B_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)    
+E2d = E_cond (Rad, Cvd, Rvd, Rae, Cve, Rve)
+sys2d = clt.ss(A2d,B2d,C,D)
+sys2dt = clt.ss(A2d,E2d,C,D0)
+Gd2 = clt.tf(sys2d)
+Pd2 = clt.poles(sys2d)
+
+
+# In[7]:
+
+
+#Distúrbios utilizados nas simulações
+
+steps_rep = 1000
+tf_rep1 = 0.75*0.05
+tf_rep2 = 0.75*0.15
+
+t_rep1 = np.linspace(0, tf_rep1, steps_rep)
+t_rep2 = np.linspace(tf_rep1, tf_rep2, steps_rep)
+
+Vec_Pvd1 = np.array([P_v(T, 5, 22, 80) for T in t_rep1])
+Vec_Pcp1 = np.array([P_cp(T, 11, 19, 80) for T in t_rep1])
+
+Vec_Pvd2 = np.array([P_v(T, 5, 22, 80) for T in t_rep2])
+Vec_Pcp2 = np.array([P_cp(T, 11, 19, 80) for T in t_rep2])
+
+Delta_Pvd1 = Vec_Pvd1 - Vec_Pcp1
+
+Delta_Pvd2 = Vec_Pvd2 - Vec_Pcp2
+
+U1_rep = Delta_Pvd1
+U2_rep = Delta_Pvd2
+
+X01 = [32.8208014 ,  128.97931383,   39.65605596,  138.07347741, 687.11288571, -145.94694028, -127.52152711]
+X02 = [37.52059196,  129.01860359,   44.67330408,  138.12876312, 682.06349792, -118.33202057, -119.51581545]
+
+
+# In[8]:
+
+
+# Função de transferência escolhida
+
+TFs1 = Gs1[1,0]
+TFs2 = Gs2[1,0]
+
+TFd1 = Gd1[1,0]
+TFd2 = Gd2[1,0]
+
+Ps1_map = clt.pzmap(TFs1, plot = False)
+Ps2_map = clt.pzmap(TFs2, plot = False)
+
+Pd1_map = clt.pzmap(TFd1, plot = False)
+Pd2_map = clt.pzmap(TFd2, plot = False)
+
+
+# In[9]:
+
+
+#Redução de ordem das funções de transferência
+
+sys1s_r = clt.balred(sys1s, 2)
+sys1d_r = clt.balred(sys1d, 2)
+Gs1_r = clt.tf(sys1s_r)
+Gd1_r = clt.tf(sys1d_r)
+
+sys2s_r = clt.balred(sys2s, 2)
+sys2d_r = clt.balred(sys2d, 2)
+Gs2_r = clt.tf(sys2s_r)
+Gd2_r = clt.tf(sys2d_r)
+
+TFs1r = Gs1_r[1,0]
+TFs2r = Gs2_r[1,0]
+
+TFd1r = Gd1_r[1,0]
+TFd2r = Gd2_r[1,0]
+
+
+# In[10]:
+
+
+# diagrama de Bode para a situação 1
+
+w = np.linspace(0.0001,10,10**6)
+
+plt.figure(dpi=300)
+M_zn_ss, φ_zn_ss, ω_zn = clt.bode_plot(TFs1, omega=w, color='lime', dB=True, label = 'Saudável')
+M_zn_ssr, φ_zn_ssr, ω_zn = clt.bode_plot(TFs1r, omega=w, color='green', dB=True, linestyle = 'dashed',label = 'Saudável de ordem reduzida')
+M_zn_sc, φ_zn_sc, ω_zn = clt.bode_plot(TFd1, omega=w, color='red', dB=True, label = 'Comprometido')
+M_zn_scr, φ_zn_scr, ω_zn = clt.bode_plot(TFd1r, omega=w, color='darkred', dB=True, linestyle = 'dashed', label = 'Comprometido de ordem reduzida')
+plt.legend()
+#plt.savefig('step_c2.png', format='png')
+
+
+# In[11]:
+
+
+# diagrama de Bode para a situação 2
+
+w = np.linspace(0.1,1000,10**6)
+
+plt.figure(dpi=300)
+M_zn_ss, φ_zn_ss, ω_zn = clt.bode_plot(TFs2, omega=w, color='lime', dB=True, label = 'Saudável')
+M_zn_ssr, φ_zn_ssr, ω_zn = clt.bode_plot(TFs2r, omega=w, color='green', dB=True, linestyle = 'dashed',label = 'Saudável de ordem reduzida')
+M_zn_sc, φ_zn_sc, ω_zn = clt.bode_plot(TFd2, omega=w, color='red', dB=True, label = 'Comprometido')
+M_zn_scr, φ_zn_scr, ω_zn = clt.bode_plot(TFd2r, omega=w, color='darkred', dB=True, linestyle = 'dashed', label = 'Comprometido de ordem reduzida')
+plt.legend()
+#plt.savefig('step_c2.png', format='png')
+
+
+# In[114]:
+
+
+# Respostas dos sistemas saudável e não saudável: impulso e degrau
+
+t_f1 = 300000                                   # intervalo de tempo de um batimento cardíaco em segundos
+steps1 = 300000                                 # passos
+t_sim1 = np.linspace(0, t_f1, steps1)        
+
+t_f2 = 10000                                   # intervalo de tempo de um batimento cardíaco em segundos
+steps2 = 5000000                                 # passos
+t_sim2 = np.linspace(0, t_f2, steps2)        
+
+T1, ys1_step, xs1_step = clt.step_response(TFs1r, T=t_sim1, return_x=True)
+T2, ys2_step, xs2_step = clt.step_response(TFs2r, T=t_sim2, return_x=True)
+
+T1, yd1_step, xd1_step = clt.step_response(TFd1r, T=t_sim1, return_x=True)
+T2, yd2_step, xd2_step = clt.step_response(TFd2r, T=t_sim2, return_x=True)
+
+T1, ys1_rep, xs1_rep = clt.forced_response(TFs1r, T=t_rep1, U=U1_rep, return_x = True)
+T2, ys2_rep, xs2_rep = clt.forced_response(TFs2r, T=t_rep1, U=U2_rep, return_x = True)
+
+T1, yd1_rep, xd1_rep = clt.forced_response(TFd1r, T=t_rep2, U=U1_rep, return_x = True)
+T2, yd2_rep, xd2_rep = clt.forced_response(TFd2r, T=t_rep2, U=U2_rep, return_x = True)
+
+#Gráfico das respostas do sistema
+
+# left, bottom, right, top, wspace, hspace = 0.1, 0.27, 0.7, 0.9, 0.4, 0.25
+
+# fig, axs = plt.subplots(nrows=3, ncols=2, figsize=(8, 6), dpi=300)
+
+# axs[0,0].plot(t_sim1, ys1_imp, 'lime', lw=1.2)
+# axs[0,0].plot(t_sim1, yd1_imp, 'red', lw=1.2)
+# axs[0,0].set_title(r'Resposta do sistema (S1)', fontfamily = 'sans-serif', fontsize = 'large')
+#axs[0,0].set_xlim(0, t_f1/5)
+
+# axs[1,0].plot(t_sim1, ys1_step, 'lime', lw=1.2)
+# axs[1,0].plot(t_sim1, yd1_step, 'red', lw=1.2)
+# axs[1,0].set_ylabel(r'Volume [ml]')
+#axs[1,0].set_xlim(0, tf/50)
+
+# axs[2,0].plot(t_rep1, ys1_rep, 'lime', lw=1.2)
+# axs[2,0].plot(t_rep1, yd1_rep, 'red', lw=1.2)
+# axs[2,0].set_xlabel(r'tempo [s]')
+#axs[2,0].set_xlim(0, tf/50)
+
+# axs[0,1].plot(t_sim2, ys2_imp, 'lime', lw=1.2)
+# axs[0,1].plot(t_sim2, yd2_imp, 'red', lw=1.2)
+# axs[0,1].set_title(r'Resposta do sistema (S2)', fontfamily = 'sans-serif', fontsize = 'large')
+# axs[0,1].set_xlim(0, t_f2/5)
+
+# axs[1,1].plot(t_sim2, ys2_step, 'lime', lw=1.2)
+# axs[1,1].plot(t_sim2, yd2_step, 'red', lw=1.2)
+# axs[1,1].set_ylabel(r'Volume ml]')
+# axs[1,1].set_xlim(0, t_f2/5)
+
+# axs[2,1].plot(t_rep2, ys2_rep, 'lime', lw=1.2)
+# axs[2,1].plot(t_rep2, yd2_rep, 'red', lw=1.2)
+# axs[2,1].set_xlabel(r'tempo [s]')
+#axs[2,1].set_xlim(0, tf/50)
+
+# for i in range (3):
+#     for j in range (2):
+#         axs[i,1].yaxis.tick_right()
+#         axs[i,1].yaxis.set_label_position("right")
+#         axs[i,j].grid(color='darkgrey', lw=0.5)
+
+# fig.legend(['Sistema saudável','Sistema em malha aberta'],bbox_to_anchor=(0.4, 0.1), loc='lower center', shadow=True, fontsize = 9)
+# plt.subplots_adjust(left, bottom, right, top, wspace, hspace)
+#plt.savefig('step_c2.png', format='png')
+
+# plt.show()
+
+
+# In[13]:
+
+
+# plt.figure(dpi=300)
+# PZL1, K1 = clt.root_locus(TFd1, xlim = (-0.01,0.01),ylim = (-0.001,0.001))
+#plt.savefig('step_c2.png', format='png')
+
+
+# In[14]:
+
+
+K_c = sy.symbols('K_c')
+s = sy.symbols('s')
+P1_c = K_c * sy.Poly(-TFd1r.num[0][0], s) + sy.Poly(TFd1r.den[0][0], s)
+RH1_c = routh(P1_c)
+RH1_c
+
+
+# In[15]:
+
+
+P1_c
+
+
+# In[16]:
+
+
+sy.solve(RH1_c[1, 0] > 0, K_c)
+
+
+# In[17]:
+
+
+sy.solve(RH1_c[2, 0] > 0, K_c)
+
+
+# In[18]:
+
+
+# ganho crítico (ultimate gain)
+
+K_u1 = -0.201787003482213
+T_u1 = clt.feedback(K_u1 * -TFd1r)
+routh(sy.Poly(T_u1.den[0][0], s))
+
+
+# In[19]:
+
+
+T_u1.poles()
+
+
+# In[20]:
+
+
+cl_poles_u1 = T_u1.poles()
+cl_poles_u1
+
+t_f1 = 100000                                   # intervalo de tempo de um batimento cardíaco em segundos
+steps1 = 20000                                 # passos
+t_sim = np.linspace(0, t_f1, steps1)        
+
+T1, ys1_test, xs1_step = clt.impulse_response(T_u1, T=t_sim, return_x=True)
+fig, axs = plt.subplots(nrows=1, ncols=1, figsize=(3, 3), dpi=300)
+
+axs.plot(t_sim, ys1_test, 'lime', lw=1.2)
+axs.set_title(r'Resposta do sistema (S1)', fontfamily = 'sans-serif', fontsize = 'small')
+plt.yticks(fontsize=8)
+plt.xticks(fontsize=8)
+
+#axs.set_xlim(0, t_f1/5)
+
+plt.show()
+
+
+# In[21]:
+
+
+# período com ganho crítico
+P_u1 = 2*np.pi/np.imag(cl_poles_u1[0])
+P_u1
+
+
+# In[22]:
+
+
+#Definição dos ganhos - Método de ganho crítio de Ziegler-Nichols - PI
+K_c_zn1 = -0.45 * K_u1
+τ_i1 = P_u1/1.2
+
+G_c_zn1 = K_c_zn1 * (1 + clt.tf([1], [τ_i1, 0]))
+G_c_zn1
+
+K_c_zn1_pid = -0.6 * K_u1
+τ_i1_pid = P_u1/2
+τ_d1_pid = P_u1/8
+
+G_c_zn1_pid = K_c_zn1_pid * (1 + clt.tf([1], [τ_i1_pid, 0]) + clt.tf([τ_d1_pid, 0], [0, 1]))
+G_c_zn1_pid
+
+
+# In[23]:
+
+
+# FT em malha aberta
+GH_zn1 = -G_c_zn1 * TFd1r
+GH_zn1_pid = -G_c_zn1_pid * TFd1r
+GH_zn1
+
+
+# In[26]:
+
+
+gm1, pm1, wcg1, wcp1 = clt.margin(GH_zn1)
+print('margens de ganho e fase:', gm1, 'e', pm1)
+print('gain crossover frequency e phase crossover frequency:', wcg1, 'e', wcp1)
+
+
+# In[211]:
+
+
+# diagrama de Bode para FTMA
+
+w = np.linspace(0.000001,1,10**6)
+
+plt.figure(dpi=300)
+M_zn_ss, φ_zn_ss, ω_zn = clt.bode_plot(GH_zn1, omega=w, color='lime', dB=True, label = 'FTMA')
+plt.axvline(wcp1, color='r', linestyle='--')
+plt.axhline(-180+pm1, color='b', linestyle='--')
+# plt.savefig('ZN_Bode_PI1.png', format='png')
+
+
+# In[28]:
+
+
+gm1_pid, pm1_pid, wcg1_pid, wcp1_pid = clt.margin(GH_zn1_pid)
+print('margens de ganho e fase:', gm1_pid, 'e', pm1_pid)
+print('gain crossover frequency e phase crossover frequency:', wcg1_pid, 'e', wcp1_pid)
+
+
+# In[212]:
+
+
+# diagrama de Bode para FTMA
+
+plt.figure(dpi=300)
+M_zn_ss_pid, φ_zn_ss_pid, ω_zn_pid = clt.bode_plot(GH_zn1_pid, omega=w, color='lime', dB=True)
+plt.axvline(wcp1_pid, color='r', linestyle='--')
+plt.axvline(0.000395, color='r', linestyle='--')
+plt.axhline(-180+pm1_pid, color='b', linestyle='--')
+plt.axhline(φ_zn_ss_pid[394]*180/np.pi, color='b', linestyle='--')
+# plt.savefig('ZN_Bode_PID1.png', format='png')
+
+
+# In[192]:
+
+
+# zero_dB_indices = np.where(np.isclose(20*np.log10(M_zn_ss_pid), 0, atol=1e-2))[0]
+# zero_dB_frequencies = ω_zn_pid[zero_dB_indices]
+# zero_dB_indices
+
+
+# In[29]:
+
+
+# phi1 = np.pi/3 + 5*np.pi/180
+# alpha1 = -(1+np.sin(phi1))/(np.sin(phi1)-1)
+# wm = 0.01
+# z1 = wm/(np.sqrt(alpha1))
+# p1 = wm*(np.sqrt(alpha1))
+# G_cp1 = alpha1*clt.tf([1,z1], [1, p1])
+# G_cp1
+# print(alpha1,z1,p1)
+
+
+# In[30]:
+
+
+# diagrama de Bode para FTMA
+
+# w = np.linspace(0.000001,1,10**6)
+
+# plt.figure(dpi=300)
+# M_zn_ss, φ_zn_ss, ω_zn = clt.bode_plot(GH_zn1*G_cp1, omega=w, color='lime', dB=True, label = 'FTMA')
+# plt.legend()
+#plt.savefig('step_c2.png', format='png')
+
+
+# In[31]:
+
+
+# FT em malha fechada
+T_zn1 = clt.feedback(GH_zn1)
+T_zn1_pid = clt.feedback(GH_zn1_pid)
+
+
+# In[32]:
+
+
+# Esforços de controle
+Nu=1e-5
+Uc1_tf = clt.feedback(G_c_zn1, -TFd1r)
+Uc1_tf_pid = clt.feedback(G_c_zn1_pid, -TFd1r)*clt.tf([1],[Nu,1])
+
+
+# In[33]:
+
+
+# diagrama de Bode em MF
+
+# plt.figure(dpi=300)
+# M_zn, φ_zn, ω_zn = clt.bode_plot(T_zn1, color='blue', dB=True)
+
+
+# In[94]:
+
+
+T1, yd1_step_zn, xd1_step = clt.step_response(T_zn1, T=t_sim1, return_x=True)
+T1, yd1_rep_zn, xd1_rep_zn = clt.forced_response(T_zn1, T=t_rep1, U=ys1_rep, return_x = True)
+
+#Gráfico das respostas do sistema
+
+left, bottom, right, top, wspace, hspace = 0.1, 0.27, 0.7, 0.9, 0.4, 0.25
+
+fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(8, 7), dpi=300)
+
+axs[0].plot(t_sim1, ys1_step, 'lime', lw=1.2)
+axs[0].plot(t_sim1, yd1_step, 'red', lw=1.2)
+axs[0].plot(t_sim1, ys1_step[9000]*yd1_step_zn, 'blue', lw=1.2)
+axs[0].set_ylabel(r'Volume [ml]')
+axs[0].set_xlim(-7500, 150000)
+
+axs[1].plot(t_rep1, ys1_rep, 'lime', lw=1.2)
+axs[1].plot(t_rep1, yd1_rep, 'red', lw=1.2)
+axs[1].plot(t_rep1, yd1_rep_zn, 'blue', lw=1.2)
+axs[1].set_xlabel(r'tempo [s]')
+
+for i in range (2):
+        axs[i].yaxis.tick_right()
+        axs[i].yaxis.set_label_position("right")
+        axs[i].grid(color='darkgrey', lw=0.5)
+
+fig.legend(['Sistema saudável','Sistema em malha aberta', 'Sistema controlado'],bbox_to_anchor=(0.4, 0.1), loc='lower center', shadow=True, fontsize = 9)
+plt.subplots_adjust(left, bottom, right, top, wspace, hspace)
+# plt.savefig('ZN_PI1.png', format='png')
+
+plt.show()
+
+
+# In[91]:
+
+
+T1_pid, yd1_step_zn_pid, xd1_step_pid = clt.step_response(T_zn1_pid, T=t_sim1, return_x=True)
+T1_pid, yd1_rep_zn_pid, xd1_rep_zn_pid = clt.forced_response(T_zn1_pid, T=t_rep1, U=ys1_rep, return_x = True)
+
+#Gráfico das respostas do sistema
+
+left, bottom, right, top, wspace, hspace = 0.1, 0.27, 0.7, 0.9, 0.4, 0.25
+
+fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(8, 7), dpi=300)
+
+axs[0].plot(t_sim1, ys1_step, 'lime', lw=1.2)
+axs[0].plot(t_sim1, yd1_step, 'red', lw=1.2)
+axs[0].plot(t_sim1, ys1_step[9000]*yd1_step_zn_pid, 'blue', lw=1.2)
+axs[0].set_ylabel(r'Volume [ml]')
+axs[0].set_xlim(-5000, 100000)
+
+axs[1].plot(t_rep1, ys1_rep, 'lime', lw=1.2)
+axs[1].plot(t_rep1, yd1_rep, 'red', lw=1.2)
+axs[1].plot(t_rep1, yd1_rep_zn_pid, 'blue', lw=1.2)
+axs[1].set_xlabel(r'tempo [s]')
+
+for i in range (2):
+        axs[i].yaxis.tick_right()
+        axs[i].yaxis.set_label_position("right")
+        axs[i].grid(color='darkgrey', lw=0.5)
+
+fig.legend(['Sistema saudável','Sistema em malha aberta', 'Sistema controlado'],bbox_to_anchor=(0.4, 0.1), loc='lower center', shadow=True, fontsize = 9)
+plt.subplots_adjust(left, bottom, right, top, wspace, hspace)
+# plt.savefig('ZN_PID1.png', format='png')
+
+plt.show()
+
+
+# In[95]:
+
+
+TEf1, Uc1_norm_step = clt.step_response(Uc1_tf, T=t_sim1)
+TEf1_pid, Uc1_norm_step_pid = clt.step_response(Uc1_tf_pid, T=t_sim1)
+
+Uc1_step = Uc1_norm_step*ys1_step[9000]
+Uc1_step_pid = Uc1_norm_step_pid*ys1_step[9000]
+
+TEf1_, Uc1_norm_rep = clt.forced_response(Uc1_tf, T=t_rep1, U=ys1_rep)
+TEf1_PID, Uc1_norm_rep_pid = clt.forced_response(Uc1_tf_pid, T=t_rep1, U=ys1_rep)
+
+Uc1_rep = np.multiply(Uc1_norm_rep,ys1_rep)
+Uc1_rep_pid = np.multiply(Uc1_norm_rep_pid,ys1_rep)
+
+#Gráfico das respostas do sistema
+
+left, bottom, right, top, wspace, hspace = 0.1, 0.35, 0.7, 0.9, 0.4, 0.25
+fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(8, 6), dpi=300)
+
+axs[0,0].plot(t_sim1, Uc1_step, 'blue', lw=1.1)
+axs[0,0].set_ylabel(r'Pressão [mmHg]')
+axs[0,0].set_xlim(-7500, 150000)
+axs[0,0].set_title(r'Entrada de controle (PI)', fontfamily = 'sans-serif', fontsize = 'large')
+
+axs[1,0].plot(t_rep1, Uc1_rep, 'blue', lw=1.1)
+axs[1,0].set_xlabel(r'tempo [s]')
+axs[1,0].set_ylabel(r'Pressão [mmHg]')
+# axs[1,0].set_xlim(-tf_rep1/20, tf_rep1+tf_rep1/20)
+
+axs[0,1].plot(t_sim1[1:], Uc1_step_pid[1:], 'blue', lw=1.1)
+axs[0,1].set_ylabel(r'Pressão [mmHg]')
+axs[0,1].set_xlim(-5000, 100000)
+axs[0,1].set_title(r'Entrada de controle (PID)', fontfamily = 'sans-serif', fontsize = 'large')
+
+axs[1,1].plot(t_rep1, Uc1_rep_pid, 'blue', lw=1.2)
+axs[1,1].set_xlabel(r'tempo [s]')
+axs[1,1].set_ylabel(r'Pressão [mmHg]')
+# axs[1,1].set_xlim(-t_rep2_plt[steps_rep-1]/20, t_rep2_plt[steps_rep-1]+t_rep2_plt[steps_rep-1]/20)
+
+for i in range (2):
+    for j in range (2):
+        axs[i,1].yaxis.tick_right()
+        axs[i,1].yaxis.set_label_position("right")
+        axs[i,j].grid(color='darkgrey', lw=0.5)
+        
+# fig.legend(['Saudável ordem reduzida','Saudável','Comprometido ordem reduzida','Comprometido','PID por alocação de polos'],bbox_to_anchor=(0.4, 0.1), loc='lower center'
+plt.subplots_adjust(left, bottom, right, top, wspace, hspace)
+# plt.savefig('ZN_U1.png', format='png')
+
+plt.show()
+
+
+# In[37]:
+
+
+K_c = sy.symbols('K_c')
+s = sy.symbols('s')
+P2_c = K_c * sy.Poly(-TFd2r.num[0][0], s) + sy.Poly(TFd2r.den[0][0], s)
+RH2_c = routh(P2_c)
+RH2_c
+
+
+# In[38]:
+
+
+sy.solve(RH2_c[1, 0] > 0, K_c)
+
+
+# In[39]:
+
+
+sy.solve(RH2_c[2, 0] > 0, K_c)
+
+
+# In[40]:
+
+
+# ganho crítico (ultimate gain)
+
+K_u2 = -0.114151003253088
+T_u2 = clt.feedback(K_u2 * -TFd2r)
+routh(sy.Poly(T_u2.den[0][0], s))
+
+
+# In[60]:
+
+
+# t_f2 = 1000                                   # intervalo de tempo de um batimento cardíaco em segundos
+# steps2 = 20000                                 # passos
+# t_sim = np.linspace(0, t_f2, steps2)        
+
+# T1, ys2_test, xs2_step = clt.impulse_response(T_u2, T=t_sim, return_x=True)
+# fig, axs = plt.subplots(nrows=1, ncols=1, figsize=(8, 6), dpi=300)
+
+# axs.plot(t_sim, ys2_test, 'lime', lw=1.2)
+# axs.set_title(r'Resposta do sistema (S1)', fontfamily = 'sans-serif', fontsize = 'large')
+# #axs.set_xlim(0, t_f1/5)
+
+# plt.show()
+
+
+# In[61]:
+
+
+cl_poles_u2 = T_u2.poles()
+
+
+# In[62]:
+
+
+# período com ganho crítico
+P_u2 = 2*np.pi/np.imag(cl_poles_u2[0])
+
+
+# In[44]:
+
+
+# Definição dos ganhos - Método de ganho crítio de Ziegler-Nichols
+K_c_zn2 = -0.45 * K_u2
+τ_i2 = P_u2/1.2
+
+G_c_zn2 = K_c_zn2 * (1 + clt.tf([1], [τ_i2, 0]))
+G_c_zn2
+
+K_c_zn2_pid = -0.6 * K_u2
+τ_i2_pid = P_u2/2
+τ_d2_pid = P_u2/8
+
+N_d2 = 1000000
+G_c_zn2_pid = K_c_zn2_pid * (1 + clt.tf([1], [τ_i2_pid, 0]) + clt.tf([τ_d2_pid, 0], [τ_d2_pid/N_d2, 1]))
+# G_c_zn2_pid = K_c_zn2_pid * (1 + clt.tf([1], [τ_i2_pid, 0]) + clt.tf([τ_d2_pid, 0], [0, 1]))
+
+
+# In[143]:
+
+
+#FT em malha aberta
+A_zn2 = G_c_zn2 * -TFd2r
+A_zn2_pid = G_c_zn2_pid * -TFd2r
+
+# FT em malha fechada
+T_zn2 = clt.feedback(G_c_zn2 * -TFd2r)
+T_zn2_pid = clt.feedback(G_c_zn2_pid * -TFd2r)
+
+
+# In[144]:
+
+
+gm2, pm2, wcg2, wcp2 = clt.margin(A_zn2)
+print('margens de ganho e fase:', gm2, 'e', pm2)
+print('gain crossover frequency e phase crossover frequency:', wcg2, 'e', wcp2)
+
+
+# In[213]:
+
+
+# diagrama de Bode em MA
+# diagrama de Bode para FTMA
+
+w = np.linspace(0.0001,100,10**6)
+
+plt.figure(dpi=300)
+M_zn_ss, φ_zn_ss, ω_zn = clt.bode_plot(A_zn2, omega=w, color='lime', dB=True, label = 'FTMA')
+plt.axvline(wcp2, color='r', linestyle='--')
+plt.axhline(-180+pm2, color='b', linestyle='--')
+# plt.savefig('ZN_Bode_PI2.png', format='png')
+
+
+# In[145]:
+
+
+gm2_pid, pm2_pid, wcg2_pid, wcp2_pid = clt.margin(A_zn2_pid)
+print('margens de ganho e fase:', gm2_pid, 'e', pm2_pid)
+print('gain crossover frequency e phase crossover frequency:', wcg2_pid, 'e', wcp2_pid)
+
+
+# In[214]:
+
+
+# diagrama de Bode para FTMA
+
+w = np.linspace(0.0001,10,10**6)
+
+plt.figure(dpi=300)
+M_zn_ss_pid, φ_zn_ss_pid, ω_zn_pid = clt.bode_plot(A_zn2_pid, omega=w, color='lime', dB=True, label = 'FTMA')
+plt.axvline(0.00564614, color='r', linestyle='--')
+plt.axvline(0.05043159, color='r', linestyle='--')
+plt.axhline(φ_zn_pid[270]*180/np.pi, color='b', linestyle='--')
+plt.axhline(φ_zn_pid[175]*180/np.pi, color='b', linestyle='--')
+# plt.savefig('ZN_Bode_PID2.png', format='png')
+
+
+# In[137]:
+
+
+T2, yd2_step_zn, xd2_step = clt.step_response(T_zn2, T=t_sim2, return_x=True)
+T2, yd2_rep_zn, xd2_rep_zn = clt.forced_response(T_zn2, T=t_rep2, U=ys2_rep, return_x = True)
+
+#Gráfico das respostas do sistema
+
+left, bottom, right, top, wspace, hspace = 0.1, 0.27, 0.7, 0.9, 0.4, 0.25
+
+fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(8, 7), dpi=300)
+
+axs[0].plot(t_sim2, ys2_step, 'lime', lw=1.2)
+axs[0].plot(t_sim2, yd2_step, 'red', lw=1.2)
+axs[0].plot(t_sim2, ys2_step[4999999]*yd2_step_zn, 'blue', lw=1.2)
+axs[0].set_ylabel(r'Volume [ml]')
+axs[0].set_xlim(-0.03, 0.6)
+# axs[0].set_ylim(-1, -0.5)
+
+axs[1].plot(t_rep2, ys2_rep, 'lime', lw=1.2)
+axs[1].plot(t_rep2, yd2_rep, 'red', lw=1.2)
+axs[1].plot(t_rep2, yd2_rep_zn, 'blue', lw=1.2)
+axs[1].set_xlabel(r'tempo [s]')
+
+for i in range (2):
+        axs[i].yaxis.tick_right()
+        axs[i].yaxis.set_label_position("right")
+        axs[i].grid(color='darkgrey', lw=0.5)
+
+fig.legend(['Sistema saudável','Sistema em malha aberta', 'Sistema controlado'],bbox_to_anchor=(0.4, 0.1), loc='lower center', shadow=True, fontsize = 9)
+plt.subplots_adjust(left, bottom, right, top, wspace, hspace)
+# plt.savefig('ZN_PI2.png', format='png')
+
+plt.show()
+
+
+# In[141]:
+
+
+T2_pid, yd2_step_zn_pid, xd2_step_pid = clt.step_response(T_zn2_pid, T=t_sim2, return_x=True)
+T2_pid, yd2_rep_zn_pid, xd2_rep_zn_pid = clt.forced_response(T_zn2_pid, T=t_rep2, U=ys2_rep, return_x = True)
+
+#Gráfico das respostas do sistema
+
+left, bottom, right, top, wspace, hspace = 0.1, 0.27, 0.7, 0.9, 0.4, 0.25
+
+fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(8, 7), dpi=300)
+
+axs[0].plot(t_sim2, ys2_step, 'lime', lw=1.2)
+axs[0].plot(t_sim2, yd2_step, 'red', lw=1.2)
+axs[0].plot(t_sim2, ys2_step[4999999]*yd2_step_zn_pid, 'blue', lw=1.2)
+axs[0].set_ylabel(r'Volume [ml]')
+axs[0].set_xlim(-0.03, 0.6)
+# axs[0].set_ylim(-1, -0.5)
+
+axs[1].plot(t_rep2, ys2_rep, 'lime', lw=1.2)
+axs[1].plot(t_rep2, yd2_rep, 'red', lw=1.2)
+axs[1].plot(t_rep2, yd2_rep_zn_pid, 'blue', lw=1.2)
+axs[1].set_xlabel(r'tempo [s]')
+
+for i in range (2):
+        axs[i].yaxis.tick_right()
+        axs[i].yaxis.set_label_position("right")
+        axs[i].grid(color='darkgrey', lw=0.5)
+
+fig.legend(['Sistema saudável','Sistema em malha aberta', 'Sistema controlado'],bbox_to_anchor=(0.4, 0.1), loc='lower center', shadow=True, fontsize = 9)
+plt.subplots_adjust(left, bottom, right, top, wspace, hspace)
+# plt.savefig('ZN_PID2.png', format='png')
+
+plt.show()
+
+
+# In[57]:
+
+
+# diagrama de Bode em MF
+M_zn_pid, φ_zn_pid, ω_zn_pid = clt.bode_plot(T_zn2_pid, color='blue', dB=True)
+
+
+# In[142]:
+
+
+# Esforços de controle
+Nu2=1e-5
+Uc2_tf = clt.feedback(G_c_zn2, -TFd2r)
+Uc2_tf_pid = clt.feedback(G_c_zn2_pid, -TFd2r)*clt.tf([1],[Nu2,1])
+
+TEf2, Uc2_norm_step = clt.step_response(Uc2_tf, T=t_sim2)
+TEf2_pid, Uc2_norm_step_pid = clt.step_response(Uc2_tf_pid, T=t_sim2)
+
+Uc2_step = Uc2_norm_step*ys2_step[4999999]
+Uc2_step_pid = Uc2_norm_step_pid*ys2_step[4999999]
+
+TEf2_, Uc2_norm_rep = clt.forced_response(Uc2_tf, T=t_rep2, U=ys2_rep)
+TEf2_PID, Uc2_norm_rep_pid = clt.forced_response(Uc2_tf_pid, T=t_rep2, U=ys2_rep)
+
+Uc2_rep = np.multiply(Uc2_norm_rep,ys2_rep)
+Uc2_rep_pid = np.multiply(Uc2_norm_rep_pid,ys2_rep)
+
+#Gráfico das respostas do sistema
+
+left, bottom, right, top, wspace, hspace = 0.1, 0.35, 0.7, 0.9, 0.4, 0.25
+fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(8, 6), dpi=300)
+
+axs[0,0].plot(t_sim2[5:], Uc2_step[5:], 'blue', lw=1.1)
+axs[0,0].set_ylabel(r'Pressão [mmHg]')
+axs[0,0].set_xlim(-0.03, 0.6)
+axs[0,0].set_ylim(-0.04, -0.02)
+axs[0,0].set_title(r'Entrada de controle (PI)', fontfamily = 'sans-serif', fontsize = 'large')
+
+axs[1,0].plot(t_rep2, Uc2_rep, 'blue', lw=1.1)
+axs[1,0].set_xlabel(r'tempo [s]')
+axs[1,0].set_ylabel(r'Pressão [mmHg]')
+# axs[1,0].set_xlim(-tf_rep1/20, tf_rep1+tf_rep1/20)
+
+axs[0,1].plot(t_sim2[1:], Uc2_step_pid[1:], 'blue', lw=1.1)
+axs[0,1].set_ylabel(r'Pressão [mmHg]')
+axs[0,1].set_xlim(-0.03, 0.6)
+axs[0,1].set_ylim(-0.09, -0.08)
+axs[0,1].set_title(r'Entrada de controle (PID)', fontfamily = 'sans-serif', fontsize = 'large')
+
+axs[1,1].plot(t_rep2, Uc2_rep_pid, 'blue', lw=1.2)
+axs[1,1].set_xlabel(r'tempo [s]')
+axs[1,1].set_ylabel(r'Pressão [mmHg]')
+# axs[1,1].set_xlim(-t_rep2_plt[steps_rep-1]/20, t_rep2_plt[steps_rep-1]+t_rep2_plt[steps_rep-1]/20)
+
+for i in range (2):
+    for j in range (2):
+        axs[i,1].yaxis.tick_right()
+        axs[i,1].yaxis.set_label_position("right")
+        axs[i,j].grid(color='darkgrey', lw=0.5)
+        
+# fig.legend(['Saudável ordem reduzida','Saudável','Comprometido ordem reduzida','Comprometido','PID por alocação de polos'],bbox_to_anchor=(0.4, 0.1), loc='lower center'
+plt.subplots_adjust(left, bottom, right, top, wspace, hspace)
+# plt.savefig('ZN_U2.png', format='png')
+
+plt.show()
